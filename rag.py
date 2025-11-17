@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import chromadb
 from chromadb.config import Settings
+from dotenv import load_dotenv
 from langchain.chains import RetrievalQA
 from langchain.llms.huggingface_pipeline import HuggingFacePipeline
 from langchain.schema import Document
@@ -14,11 +15,10 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama  # или другая LLM
 from langchain_community.vectorstores import Chroma
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import BasePromptTemplate
+from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
-from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -107,6 +107,7 @@ class SimpleRAG:
     def _clean_text(self, text: str) -> str:
         """Очистка текста"""
         import re
+
         # Удаление лишних пробелов
         text = re.sub(r'\s+', ' ', text)
         # Удаление специальных символов (опционально)
@@ -215,7 +216,7 @@ class SimpleRAG:
 
 Ответ:"""
 
-        PROMPT = PromptTemplate(
+        PROMPT = BasePromptTemplate(
             template=prompt_template,
             input_variables=["context", "question"]
         )

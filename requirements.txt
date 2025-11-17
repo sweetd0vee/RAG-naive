@@ -6,6 +6,7 @@ langchain-community==0.2.19
 langchain-core==1.0.5
 langchain-huggingface>=0.0.4
 langchain-text-splitters==1.0.0
+pydantic==2.12.4
 pypdf==6.2.0
 python-dotenv==1.2.1
 sentence-transformers==5.1.2
