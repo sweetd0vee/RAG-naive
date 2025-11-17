@@ -1,9 +1,12 @@
-# Python
+# Ignore compiled Python files
 __pycache__/
 *.pyc
 .idea/
 .DS_Store
 ../.DS_Store
 
-# Virtual environments
+# Ignore virtual environment directories
 venv/
+
+# Ignore sensitive information/secrets
+.env

@@ -18,12 +18,12 @@ from langchain_core.prompts import PromptTemplate
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-os.environ["HUGGINGFACEHUB_API_TOKEN"] = getpass.getpass(
-    "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"
-)
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
 load_dotenv()
+
+hf_token = os.environ.get("HUGGINGFACEHUB_API_TOKEN")
 
 
 class SimpleRAG:
