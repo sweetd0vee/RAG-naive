@@ -13,9 +13,9 @@ from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import Ollama  # или другая LLM
+from langchain_community.llms import Ollama
 from langchain_community.vectorstores import Chroma
-from langchain_core.prompts import BasePromptTemplate
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
@@ -33,9 +33,13 @@ class SimpleRAG:
         self.vectorstore = None
         self.qa_chain = None
         self.embeddings = None
+        self.llm = None
 
         # Настройка логирования
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
         self.logger = logging.getLogger(__name__)
 
     def load_and_process_document(self, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Document]:
@@ -58,7 +62,7 @@ class SimpleRAG:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             length_function=len,
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ". ", "! ", "? ", "; ", ": ", " ", ""]
         )
         chunks = text_splitter.split_documents(documents)
         self.logger.info(f"Создано {len(chunks)} чанков из документа")
@@ -97,7 +101,7 @@ class SimpleRAG:
             chunk.page_content = cleaned_content
             if 'page' not in chunk.metadata:
                 chunk.metadata['page'] = 0
-            chunk.metadata['source'] = self.pdf_path
+            chunk.metadata['source'] = os.path.basename(self.pdf_path)
             chunk.metadata['chunk_id'] = i
 
             valid_chunks.append(chunk)
@@ -123,78 +127,35 @@ class SimpleRAG:
         self.logger.info("Создание векторной базы...")
 
         try:
-            # Способ 1: Самый простой (работает с chromadb==0.4.22)
+            # Способ 1: Использование Chroma
             self.vectorstore = Chroma.from_documents(
                 documents=chunks,
                 embedding=self.embeddings,
                 persist_directory=self.persist_directory
             )
-            # Не вызываем persist() - он вызывается автоматически
-            self.logger.info("Векторная база создана успешно (способ 1)")
+            self.logger.info("Векторная база создана успешно")
 
         except Exception as e:
-            self.logger.warning(f"Способ 1 не сработал: {e}")
-            self.logger.info("Пробую способ 2...")
-            self.vectorstore = self._create_vectorstore_faiss(chunks)
-
-    def _create_vectorstore_alternative(self, chunks: List[Document]):
-        """Альтернативный способ создания векторной базы"""
-        try:
-            import chromadb
-
-            client = chromadb.PersistentClient(path=self.persist_directory)
-
-            collection = client.get_or_create_collection(
-                name="documents",
-                metadata={"hnsw:space": "cosine"}
-            )
-
-            documents = []
-            metadatas = []
-            ids = []
-
-            for i, chunk in enumerate(chunks):
-                documents.append(chunk.page_content)
-                metadatas.append(chunk.metadata)
-                ids.append(f"doc_{i}")
-
-            collection.add(
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids
-            )
-
-            vectorstore = Chroma(
-                client=client,
-                collection_name="documents",
-                embedding_function=self.embeddings,
-            )
-
-            vectorstore.persist()
-            return vectorstore
-
-        except Exception as e:
-            self.logger.error(f"Альтернативный способ также не сработал: {e}")
-            raise
-
+            self.logger.warning(f"Chroma не сработал: {e}")
+            self.logger.info("Пробую использовать FAISS...")
+            self._create_vectorstore_faiss(chunks)
 
     def _create_vectorstore_faiss(self, chunks: List[Document]):
         """Резервный способ с FAISS"""
         try:
             from langchain_community.vectorstores import FAISS
 
-            vectorstore = FAISS.from_documents(chunks, self.embeddings)
-            vectorstore.save_local(self.persist_directory)
-
+            self.vectorstore = FAISS.from_documents(chunks, self.embeddings)
+            # Сохраняем FAISS индекс
+            self.vectorstore.save_local(self.persist_directory)
             self.logger.info("Векторная база создана с использованием FAISS")
-            return vectorstore
 
         except Exception as e:
             self.logger.error(f"FAISS также не сработал: {e}")
             raise RuntimeError("Не удалось создать векторное хранилище")
 
-
-    def setup_qa_chain(self, model_name: str = "llama2", search_k: int = 3):
+    def setup_qa_chain(self, model_name: str = "llama2", search_k: int = 3,
+                       temperature: float = 0.1, max_tokens: int = 512):
         """Настройка цепочки вопрос-ответ"""
 
         if not self.vectorstore:
@@ -213,16 +174,23 @@ class SimpleRAG:
 2. Если ответа нет в контексте, скажи "В предоставленных документах нет информации для ответа на этот вопрос"
 3. Будь точным и лаконичным
 4. Используй маркированные списки если уместно
+5. Не придумывай информацию, которой нет в контексте
 
 Ответ:"""
 
-        PROMPT = BasePromptTemplate(
+        # Создание промпта с использованием правильного класса
+        PROMPT = PromptTemplate(
             template=prompt_template,
             input_variables=["context", "question"]
         )
 
         try:
-            llm = Ollama(model=model_name)
+            # Инициализация LLM с параметрами
+            self.llm = Ollama(
+                model=model_name,
+                temperature=temperature,
+                num_predict=max_tokens
+            )
         except Exception as e:
             self.logger.error(f"Ошибка загрузки модели {model_name}: {e}")
             raise
@@ -232,23 +200,23 @@ class SimpleRAG:
             search_type="similarity",
             search_kwargs={
                 "k": search_k,
-                "score_threshold": 0.5  # Опциональный порог схожести
+                "score_threshold": 0.3  # Более мягкий порог
             }
         )
 
+        # Создание QA цепи
         self.qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
+            llm=self.llm,
             chain_type="stuff",
             retriever=retriever,
             chain_type_kwargs={
                 "prompt": PROMPT,
-                "verbose": True
             },
             return_source_documents=True,
-            verbose=True
+            verbose=False  # Отключаем подробное логирование для продакшена
         )
 
-        self.logger.info("Цепочка QA успешно настроена")
+        self.logger.info(f"Цепочка QA успешно настроена с моделью {model_name}")
 
     def ask_question(self, question: str) -> Dict[str, Any]:
         """Задать вопрос системе RAG"""
@@ -261,16 +229,19 @@ class SimpleRAG:
             result = self.qa_chain({"query": question})
 
             # Форматированный вывод
-            print(f"\nОтвет: {result['result']}")
-            print(f"\nИспользованные источники ({len(result['source_documents'])}):")
+            print(f"\n🤖 Ответ: {result['result']}")
 
-            for i, doc in enumerate(result['source_documents']):
-                page = doc.metadata.get('page', 'N/A')
+            if result['source_documents']:
+                print(f"\n📚 Использованные источники ({len(result['source_documents'])}:")
+                for i, doc in enumerate(result['source_documents']):
+                    page = doc.metadata.get('page', 'N/A')
                 source = doc.metadata.get('source', 'Unknown')
                 preview = doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content
-                print(f"   {i+1}. Страница {page} | {source}")
+                print(f"   {i + 1}. Страница {page} | {source}")
                 print(f"      📄 {preview}")
                 print()
+            else:
+                print("\n⚠️  Источники не найдены")
 
             return {
                 "answer": result['result'],
@@ -299,13 +270,35 @@ class SimpleRAG:
         if not self.vectorstore:
             return {"status": "Документы не загружены"}
 
-        # Получение количества документов в коллекции
-        collection = self.vectorstore._collection
-        count = collection.count() if collection else 0
+        try:
+            # Для Chroma
+            if hasattr(self.vectorstore, '_collection'):
+                collection = self.vectorstore._collection
+                count = collection.count() if collection else 0
+            # Для FAISS - приблизительный подсчет
+            elif hasattr(self.vectorstore, 'index'):
+                count = self.vectorstore.index.ntotal if hasattr(self.vectorstore.index, 'ntotal') else "Unknown"
+            else:
+                count = "Unknown"
 
-        return {
-            "document_path": self.pdf_path,
-            "vector_store": self.persist_directory,
-            "document_count": count,
-            "status": "Загружено"
-        }
+            return {
+                "document_path": self.pdf_path,
+                "vector_store": self.persist_directory,
+                "document_count": count,
+                "embedding_model": "all-MiniLM-L6-v2",
+                "status": "Загружено"
+            }
+        except Exception as e:
+            self.logger.error(f"Ошибка получения информации: {e}")
+            return {
+                "document_path": self.pdf_path,
+                "status": "Ошибка получения информации"
+            }
+
+    def clear_vectorstore(self):
+        """Очистка векторного хранилища"""
+        if os.path.exists(self.persist_directory):
+            shutil.rmtree(self.persist_directory)
+            self.logger.info("Векторное хранилище очищено")
+        self.vectorstore = None
+        self.qa_chain = None
